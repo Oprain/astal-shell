@@ -1,7 +1,0 @@
-{
-  "$schema": "https://unpkg.com/knip@latest/schema.json",
-  "entry": ["app.ts"],
-  "project": ["**/*.{ts,tsx}"],
-  "ignoreDependencies": ["gi", "^ags"],
-  "ignore": ["support/niri.tsx"]
-}
