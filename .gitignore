@@ -1,3 +1,14 @@
 node_modules/
 @girs/
 result
+/desktop-result
+/target/
+/.direnv/
+/.test-artifacts/
+__pycache__/
+*.py[cod]
+/docs/
+/tests/
+/examples/
+/src/artwork_tests.rs
+/src/ui/tests.rs

@@ -1,0 +1,25 @@
+[package]
+name = "astal-shell"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A native Rust overview shell for Niri"
+license = "GPL-3.0-only"
+autoexamples = false
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10", features = ["v4_12"] }
+gtk4-layer-shell = "0.7"
+kdl = { version = "6.5", features = ["v1-fallback"] }
+libc = "0.2"
+pangocairo = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = true
