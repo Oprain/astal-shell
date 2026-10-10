@@ -1,101 +1,64 @@
 {
-  description = "AGS Shell Configuration";
+  description = "Native Rust overview shell for Niri";
+  inputs.nixpkgs.url = "nixpkgs/nixpkgs-unstable";
 
-  inputs = {
-    nixpkgs.url = "nixpkgs/nixpkgs-unstable";
-
-    ags = {
-      url = "github:aylur/ags";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
-
-  outputs = {
-    self,
-    nixpkgs,
-    ags,
-  }: let
-    system = "x86_64-linux";
-    pkgs = nixpkgs.legacyPackages.${system};
-
-    astalPackages = with ags.packages.${system}; [
-      io
-      astal4
-      battery
-      apps
-      mpris
-      network
-      tray
-      wireplumber
-    ];
-
-    extraPackages =
-      astalPackages
-      ++ (with pkgs; [
-        gnome-weather
-        gnome-calendar
-        mission-center
-        curl
-        systemd
-        libgtop
-        brightnessctl
-        libadwaita
-        libsoup_3
-        gjs
-        glib
-        gtk4-layer-shell
-      ]);
-
-    agsCustom = (
-      ags.packages.${system}.default
-          .override
-      {
-        inherit extraPackages;
-      }
-    );
-  in {
-    packages.${system} = {
-      ags = agsCustom;
-      default = pkgs.stdenv.mkDerivation rec {
-        name = "astal-shell";
-        pname = "astal-shell";
-        entry = "app.ts";
-
-        src =
-          builtins.filterSource
-          (path: type: let
-            name = builtins.baseNameOf path;
-          in
-            name != "node_modules" && name != "result" && name != ".git" && name != ".jj")
-          ./.;
-        nativeBuildInputs = with pkgs; [
-          wrapGAppsHook4
-          gobject-introspection
-          agsCustom
+  outputs = { self, nixpkgs }: let
+    systems = [ "x86_64-linux" "aarch64-linux" ];
+    eachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    makePackage = pkgs: pkgs.rustPlatform.buildRustPackage {
+      pname = "astal-shell";
+      version = "0.2.0";
+      src = pkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = pkgs.lib.fileset.unions [
+          ./Cargo.toml ./Cargo.lock ./src ./LICENSE
         ];
-        buildInputs = extraPackages;
-        installPhase = ''
-          runHook preInstall
-
-           mkdir -p $out/bin
-           mkdir -p $out/share
-           cp -r * $out/share
-           ags bundle --gtk 4 ${entry} $out/bin/${pname} -d "SRC='$out/share'"
-
-           runHook postInstall
-        '';
+      };
+      cargoLock.lockFile = ./Cargo.lock;
+      nativeBuildInputs = with pkgs; [ pkg-config wrapGAppsHook4 ];
+      buildInputs = with pkgs; [ gtk4 gtk4-layer-shell ];
+      # Preserve the session's XDG_DATA_DIRS (including Home Manager's icon
+      # packages). Adwaita is only a fallback, never a forced theme.
+      preFixup = ''
+        gappsWrapperArgs+=(
+          --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bash pkgs.curl pkgs.wireplumber pkgs.brightnessctl pkgs.systemd pkgs.niri ]}
+          --suffix XDG_DATA_DIRS : ${pkgs.adwaita-icon-theme}/share
+        )
+      '';
+      meta = with pkgs.lib; {
+        description = "Rust GTK4 overview shell for Niri";
+        license = licenses.gpl3Only;
+        platforms = platforms.linux;
+        mainProgram = "astal-shell";
       };
     };
-
-    apps.${system}.default = {
-      type = "app";
-      program = "${self.packages.${system}.default}/bin/astal-shell";
-    };
-
-    overlays.default = final: prev: {
-      astal-shell = self.packages.${system}.default;
-    };
-
-    homeManagerModules.default = ./home-manager.nix;
+  in {
+    packages = eachSystem (pkgs: {
+      default = makePackage pkgs;
+      astal-shell = makePackage pkgs;
+    });
+    apps = eachSystem (pkgs: {
+      default = {
+        type = "app";
+        program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/astal-shell";
+      };
+    });
+    devShells = eachSystem (pkgs: {
+      default = pkgs.mkShell {
+        packages = with pkgs; [
+          rustc cargo rustfmt clippy pkg-config gtk4 gtk4-layer-shell
+          dbus wayland niri curl brightnessctl wireplumber ripgrep
+        ];
+        RUST_BACKTRACE = "1";
+        shellHook = ''
+          export XDG_DATA_DIRS="''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:${pkgs.adwaita-icon-theme}/share"
+        '';
+      };
+    });
+    checks = eachSystem (pkgs: {
+      build = makePackage pkgs;
+    });
+    overlays.default = final: prev: { astal-shell = makePackage final; };
+    homeManagerModules.default = import ./home-manager.nix self;
   };
 }
