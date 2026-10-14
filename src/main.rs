@@ -4,6 +4,7 @@ mod media;
 mod meter;
 mod tray;
 mod ui;
+mod workspaces;
 
 use astal_shell::{config::Config, geometry, ipc, model::Output};
 use gtk::prelude::*;

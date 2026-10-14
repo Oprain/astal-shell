@@ -1,4 +1,4 @@
-use crate::{icons::AppIcons, media, meter::Meter, tray::Tray};
+use crate::{icons::AppIcons, media, meter::Meter, tray::Tray, workspaces::WorkspaceIndicator};
 use astal_shell::{
     config::{Config, QuickSetting},
     geometry::{self, OutputSize},
@@ -170,6 +170,7 @@ struct Bars {
     bottom: gtk::ApplicationWindow,
     bottom_content: gtk::ScrolledWindow,
     workspaces: gtk::Box,
+    workspace_indicator: WorkspaceIndicator,
     workspace_buttons: BTreeMap<u64, gtk::Button>,
     dock: gtk::Box,
     dock_buttons: BTreeMap<u64, gtk::Button>,
@@ -250,9 +251,10 @@ impl Bars {
         let workspaces = gtk::Box::new(gtk::Orientation::Vertical, 6);
         workspaces.set_halign(gtk::Align::Center);
         workspaces.set_valign(gtk::Align::Center);
+        let workspace_indicator = WorkspaceIndicator::new(&workspaces);
         let workspace_scroll = gtk::ScrolledWindow::new();
         workspace_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::External);
-        workspace_scroll.set_child(Some(&workspaces));
+        workspace_scroll.set_child(Some(&workspace_indicator.overlay));
         left.set_child(Some(&workspace_scroll));
 
         let bottom = layer_window(
@@ -266,6 +268,7 @@ impl Bars {
         dock.add_css_class("panel");
         dock.add_css_class("dock");
         dock.set_halign(gtk::Align::Center);
+        dock.set_size_request(-1, 48);
         let bottom_content = gtk::ScrolledWindow::new();
         bottom_content.set_policy(gtk::PolicyType::External, gtk::PolicyType::Never);
         bottom_content.set_propagate_natural_height(true);
@@ -319,6 +322,7 @@ impl Bars {
             bottom,
             bottom_content,
             workspaces,
+            workspace_indicator,
             workspace_buttons: BTreeMap::new(),
             dock,
             dock_buttons: BTreeMap::new(),
@@ -442,6 +446,8 @@ impl Bars {
                 .collect::<Vec<_>>()
         );
         if signature != self.dock_signature {
+            self.dock
+                .set_opacity(if windows.is_empty() { 0. } else { 1. });
             let ids: BTreeSet<_> = windows.iter().map(|w| w.id).collect();
             self.dock_buttons.retain(|id, button| {
                 if ids.contains(id) {
@@ -572,9 +578,13 @@ impl Bars {
             self.top_content.measure(gtk::Orientation::Horizontal, -1).0 <= placement.card_width;
         self.top
             .set_visible(shown && placement.top_visible && top_fits);
-        self.bottom
-            .set_visible(shown && placement.bottom_visible && !state.windows_on(output).is_empty());
+        self.bottom.set_visible(shown && placement.bottom_visible);
         self.left.set_visible(shown && placement.left_visible);
+        self.workspace_indicator.update(
+            state
+                .active_on(output)
+                .and_then(|workspace| self.workspace_buttons.get(&workspace.id)),
+        );
         let osd_width = self
             .volume
             .window
@@ -607,6 +617,12 @@ impl Bars {
                 "connected": state.connected,
                 "revealDelayMs": config.settings.reveal_delay_ms,
                 "clock": self.clock.text().to_string(),
+                "workspaceIndicator": {
+                    "bounds": widget_bounds(&self.workspace_indicator.marker, &self.left,
+                        (f64::from(placement.left), f64::from(config.settings.clearance + 2))),
+                    "visible": self.workspace_indicator.marker.is_visible(),
+                    "animating": self.workspace_indicator.is_animating(),
+                },
                 "targets": {
                     "workspaces": child_bounds(&self.workspaces, &self.left,
                         (f64::from(placement.left), f64::from(config.settings.clearance + 2)),
@@ -880,11 +896,12 @@ pub fn start(app: &gtk::Application) -> bool {
                     state.output_revision = state.output_revision.wrapping_add(1);
                 }
                 Message::Event(event) => {
-                    if state.overview_open && event.get("WorkspaceActivated").is_some() {
-                        overview_since = Some(Instant::now());
-                    }
+                    let was_open = state.overview_open;
                     if let Err(e) = state.apply(event) {
                         eprintln!("Niri event: {e}");
+                    }
+                    if state.overview_open != was_open {
+                        overview_since = state.overview_open.then(Instant::now);
                     }
                 }
             }

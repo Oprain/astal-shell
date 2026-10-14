@@ -54,7 +54,7 @@ The default package comes from the flake; adding the overlay is optional. `servi
 
 ## Workspaces and overview positioning
 
-Each GDK monitor is keyed by its output connector, matching Niri's `Workspace.output` and `Outputs` names. Its left indicators and bottom dock show only that output's workspaces and active workspace windows. Workspace clicks use stable workspace IDs, so duplicate indices on different displays are unambiguous. Active, focused, and urgent workspaces have separate states. Hotplugging a monitor closes its windows and rebuilds them if the connector returns.
+Each GDK monitor is keyed by its output connector, matching Niri's `Workspace.output` and `Outputs` names. Its left indicators and bottom dock show only that output's workspaces and active workspace windows. Workspace clicks use stable workspace IDs, so duplicate indices on different displays are unambiguous. The active marker slides between buttons over 200 ms and changes direction smoothly during rapid switches. Disabling GTK animations makes the marker update immediately. Active, focused, and urgent workspaces have separate states. Hotplugging a monitor closes its windows and rebuilds them if the connector returns.
 
 Margins follow Niri's overview zoom, workspace gap, output logical dimensions, and fractional pixel rounding. Bars are measured after GTK theme styling. If the gap cannot contain a bar and the requested clearance, the top and bottom bars hide; the left indicators remain when the side margin has room. Optional top-bar content collapses when the card width is too narrow. The dock scrolls rather than exceeding the card width. No per-display margins are needed.
 
@@ -80,7 +80,7 @@ overview {
 
 The layer rule keeps these surfaces in output coordinates. Custom rules that subsequently enable `place-within-backdrop` for the shell change that geometry and should be removed or narrowed.
 
-Niri's opening animation progress is not exposed over IPC. The shell waits 300 ms before appearing and hides immediately on close. Increase `niri.revealDelayMs` if your opening animation is longer. The no-overlap calculation applies to settled overview cards; custom animations and dragging between workspaces need visual acceptance testing on the target compositor.
+Niri's opening animation progress is not exposed over IPC. The shell waits 300 ms when opening the overview and hides immediately on close. Switching workspaces does not restart this delay, so the bars remain mapped during vertical navigation. An empty workspace clears the dock's icons and background while preserving its surface and height. Increase `niri.revealDelayMs` if your opening animation is longer. The no-overlap calculation applies to settled overview cards; custom animations and dragging between workspaces need visual acceptance testing on the target compositor.
 
 ```nix
 services.astal-shell.niri = {
