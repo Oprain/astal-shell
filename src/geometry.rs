@@ -11,6 +11,7 @@ pub struct OutputSize {
 pub struct Placement {
     pub horizontal: i32,
     pub vertical: i32,
+    pub bottom_vertical: i32,
     pub left: i32,
     pub left_width: i32,
     pub card_width: i32,
@@ -44,25 +45,25 @@ pub fn place(
     let gap_start = y - gap;
     let gap_end = y;
     let edge = f64::from(clearance.max(0));
-    let fits = |height: i32| {
-        let start = gap_start + (gap - f64::from(height)) / 2.;
-        start >= edge && start + f64::from(height) <= gap_end - edge
-    };
     // GTK layer margins are integer logical pixels. Round inward, leaving a
     // further pixel of room for fractional-scale compositor rounding.
-    let top = (gap_start + (gap - f64::from(top_height.max(bottom_height))) / 2.)
-        .ceil()
-        .max(0.);
-    let fits_both = fits(top_height.max(bottom_height))
-        && top + f64::from(top_height.max(bottom_height)) <= gap_end - edge;
+    let margin = |height: i32| {
+        let height = f64::from(height.max(0));
+        let start = (gap_start + (gap - height) / 2.).ceil().max(0.);
+        let fits = start >= edge && start >= gap_start + edge && start + height <= gap_end - edge;
+        (start as i32, fits)
+    };
+    let (top, top_visible) = margin(top_height);
+    let (bottom, bottom_visible) = margin(bottom_height);
     Placement {
         horizontal: x.ceil() as i32,
-        vertical: top as i32,
+        vertical: top,
+        bottom_vertical: bottom,
         left: edge.ceil() as i32,
         left_width,
         card_width: (output.width - 2. * x.ceil()).floor().max(0.) as i32,
-        top_visible: fits_both,
-        bottom_visible: fits_both,
+        top_visible,
+        bottom_visible,
         left_visible: f64::from(left_width) + 2. * edge + 1. <= x,
     }
 }
@@ -99,7 +100,11 @@ mod tests {
                 let gap = ((h * 0.1 * z * scale).round() / scale).max(1. / scale);
                 if p.top_visible {
                     assert!(f64::from(p.vertical) >= y - gap + 3. - 1e-6);
-                    assert!(f64::from(p.vertical + 52) <= y - 3. + 1e-6);
+                    assert!(f64::from(p.vertical + 48) <= y - 3. + 1e-6);
+                }
+                if p.bottom_visible {
+                    assert!(f64::from(p.bottom_vertical) >= y - gap + 3. - 1e-6);
+                    assert!(f64::from(p.bottom_vertical + 52) <= y - 3. + 1e-6);
                 }
                 if p.left_visible {
                     assert!(f64::from(p.left + p.left_width) < f64::from(p.horizontal));
@@ -125,6 +130,23 @@ mod tests {
         assert!(!p.top_visible);
         assert!(!p.bottom_visible);
         assert!(p.left_visible);
+    }
+
+    #[test]
+    fn oversized_content_only_hides_its_own_bar() {
+        let output = OutputSize {
+            width: 1920.,
+            height: 1080.,
+            scale: 1.,
+        };
+        let tall_media = place(output, 0.5, 512, 32, 20, 3);
+        assert!(!tall_media.top_visible);
+        assert!(tall_media.bottom_visible);
+        assert!(tall_media.left_visible);
+
+        let tall_dock = place(output, 0.5, 32, 512, 20, 3);
+        assert!(tall_dock.top_visible);
+        assert!(!tall_dock.bottom_visible);
     }
 
     #[test]

@@ -253,15 +253,48 @@ pub fn parse_volume(text: &str) -> Option<Volume> {
     })
 }
 
+fn start_levels(tx: Sender<Update>) {
+    thread::spawn(move || {
+        let mut last_volume = None;
+        let mut last_brightness = None;
+        loop {
+            let started = Instant::now();
+            if let Some(value) = output(
+                "wpctl",
+                &["get-volume", "@DEFAULT_AUDIO_SINK@"],
+                Duration::from_secs(1),
+            )
+            .ok()
+            .and_then(|text| parse_volume(&text))
+                && last_volume.as_ref() != Some(&value)
+            {
+                last_volume = Some(value.clone());
+                if tx.send(Update::Volume(value)).is_err() {
+                    return;
+                }
+            }
+            if let Some(value) = brightness()
+                && last_brightness != Some(value)
+            {
+                last_brightness = Some(value);
+                if tx.send(Update::Brightness(value)).is_err() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(100).saturating_sub(started.elapsed()));
+        }
+    });
+}
+
 pub fn start() -> Receiver<Update> {
     let (tx, rx) = mpsc::channel();
+    // Keep slow GPU and disk queries out of the volume/brightness response path.
+    start_levels(tx.clone());
     thread::spawn(move || {
         let mut previous_cpu = cpu_totals(&read("/proc/stat"));
         let mut previous_net = net_counters(&read("/proc/net/dev"));
         let mut previous_time = Instant::now();
         let mut last_metrics = Instant::now() - Duration::from_secs(2);
-        let mut last_volume = None;
-        let mut last_brightness = None;
         loop {
             if last_metrics.elapsed() >= Duration::from_secs(2) {
                 let cpu = cpu_totals(&read("/proc/stat"));
@@ -314,28 +347,6 @@ pub fn start() -> Receiver<Update> {
                     return;
                 }
                 last_metrics = Instant::now();
-            }
-            if let Some(value) = output(
-                "wpctl",
-                &["get-volume", "@DEFAULT_AUDIO_SINK@"],
-                Duration::from_secs(1),
-            )
-            .ok()
-            .and_then(|text| parse_volume(&text))
-                && last_volume.as_ref() != Some(&value)
-            {
-                last_volume = Some(value.clone());
-                if tx.send(Update::Volume(value)).is_err() {
-                    return;
-                }
-            }
-            if let Some(value) = brightness()
-                && last_brightness != Some(value)
-            {
-                last_brightness = Some(value);
-                if tx.send(Update::Brightness(value)).is_err() {
-                    return;
-                }
             }
             thread::sleep(Duration::from_millis(500));
         }

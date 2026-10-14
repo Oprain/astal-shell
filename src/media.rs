@@ -1,6 +1,6 @@
 use crate::artwork::ArtworkCache;
 use glib::variant::ToVariant;
-use gtk::{gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, graphene, prelude::*};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -156,6 +156,30 @@ pub fn action(bus_name: &str, method: &str) {
     });
 }
 
+fn cover_picture(path: Option<&PathBuf>) -> gtk::Picture {
+    let image = gtk::Picture::new();
+    if let Some(texture) = path.and_then(|path| gdk::Texture::from_filename(path).ok()) {
+        let side = 36.;
+        let scale = side / texture.width().min(texture.height()).max(1) as f32;
+        let width = texture.width() as f32 * scale;
+        let height = texture.height() as f32 * scale;
+        let snapshot = gtk::Snapshot::new();
+        snapshot.push_clip(&graphene::Rect::new(0., 0., side, side));
+        snapshot.append_texture(
+            &texture,
+            &graphene::Rect::new((side - width) / 2., (side - height) / 2., width, height),
+        );
+        snapshot.pop();
+        // A size request is only a minimum; bound the artwork's natural size too.
+        let paintable = snapshot.to_paintable(Some(&graphene::Size::new(side, side)));
+        image.set_paintable(paintable.as_ref());
+    }
+    image.set_widget_name("media-artwork");
+    image.set_size_request(36, 36);
+    image.set_content_fit(gtk::ContentFit::Cover);
+    image
+}
+
 pub fn render(container: &gtk::Box, players: &[Player]) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
@@ -167,13 +191,7 @@ pub fn render(container: &gtk::Box, players: &[Player]) {
         cover.set_widget_name("media-cover");
         cover.add_css_class("cover-art");
         cover.set_overflow(gtk::Overflow::Hidden);
-        let image = match &player.cover {
-            Some(path) => gtk::Picture::for_filename(path),
-            None => gtk::Picture::new(),
-        };
-        image.set_widget_name("media-artwork");
-        image.set_size_request(36, 36);
-        image.set_content_fit(gtk::ContentFit::Cover);
+        let image = cover_picture(player.cover.as_ref());
         cover.set_child(Some(&image));
         let play = gtk::Button::new();
         play.set_widget_name("media-play-pause");

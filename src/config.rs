@@ -233,9 +233,8 @@ impl Config {
              .panel button {{ min-width: 24px; min-height: 24px; padding: 2px; background: transparent; border: none; box-shadow: none; }}
              .panel button:hover {{ background: {secondary_bg}; }}
              .panel .quick-action {{ border-radius: {large_radius}; }}
-             .workspace {{ min-width: 8px; min-height: 24px; padding: 0; border-radius: {small_radius}; background: {secondary_accent}; }}
+             .workspace {{ min-width: 8px; min-height: 24px; padding: 0; border-radius: {small_radius}; background: {secondary_accent}; border: none; box-shadow: none; outline: none; }}
              .workspace.active {{ background: {accent}; }}
-             .workspace.focused {{ outline: 1px solid {fg}; }}
              .workspace.urgent {{ background: {warning}; }}
              .dock button {{ padding: {small_space}; border-radius: {medium_radius}; opacity: {low}; color: {unfocused}; }}
              .dock button.focused {{ opacity: {high}; color: {focused}; background: {secondary_bg}; }}

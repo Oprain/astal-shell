@@ -66,6 +66,23 @@ impl Osd {
         self.window
             .set_visible(safe && self.until.is_some_and(|until| until > Instant::now()));
     }
+
+    pub(crate) fn show_volume(&mut self, volume: &system::Volume) {
+        let icon = if volume.muted {
+            "audio-volume-muted-symbolic"
+        } else if volume.level < 0.33 {
+            "audio-volume-low-symbolic"
+        } else if volume.level < 0.66 {
+            "audio-volume-medium-symbolic"
+        } else {
+            "audio-volume-high-symbolic"
+        };
+        self.show(volume.level, icon);
+        if volume.muted {
+            self.label
+                .set_label(&format!("Muted\n{:.0}%", volume.level * 100.));
+        }
+    }
 }
 
 fn layer_window(
@@ -196,6 +213,7 @@ impl Bars {
         let center = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let clock = gtk::Label::new(None);
         clock.add_css_class("clock");
+        clock.set_justify(gtk::Justification::Center);
         let date = gtk::Button::new();
         date.set_child(Some(&clock));
         date.connect_clicked(|_| system::execute(vec!["gnome-calendar".into()]));
@@ -541,7 +559,8 @@ impl Bars {
             window.set_margin(Edge::Right, placement.horizontal);
         }
         self.top.set_margin(Edge::Top, placement.vertical);
-        self.bottom.set_margin(Edge::Bottom, placement.vertical);
+        self.bottom
+            .set_margin(Edge::Bottom, placement.bottom_vertical);
         self.bottom_content.set_max_content_width(width);
         self.left.set_margin(Edge::Left, placement.left);
         self.left.set_default_size(left_width, -1);
@@ -575,7 +594,7 @@ impl Bars {
             );
             let bottom_origin = (
                 f64::from(placement.horizontal),
-                size.height - f64::from(placement.vertical + self.bottom.height()),
+                size.height - f64::from(placement.bottom_vertical + self.bottom.height()),
             );
             let snapshot = json!({
                 "output": output,
@@ -587,6 +606,7 @@ impl Bars {
                 "shown": shown,
                 "connected": state.connected,
                 "revealDelayMs": config.settings.reveal_delay_ms,
+                "clock": self.clock.text().to_string(),
                 "targets": {
                     "workspaces": child_bounds(&self.workspaces, &self.left,
                         (f64::from(placement.left), f64::from(config.settings.clearance + 2)),
@@ -841,7 +861,7 @@ pub fn start(app: &gtk::Application) -> bool {
     let mut last_volume = None;
     let mut last_brightness = None;
     let mut weather_value: Option<WeatherDisplay> = None;
-    glib::timeout_add_local(Duration::from_millis(100), move || {
+    glib::timeout_add_local(Duration::from_millis(50), move || {
         let _hold = &hold;
         for message in ipc.try_iter().take(1000) {
             let mut state = model.borrow_mut();
@@ -998,7 +1018,7 @@ pub fn start(app: &gtk::Application) -> bool {
         drop(state);
         let clock = glib::DateTime::now_local()
             .ok()
-            .and_then(|d| d.format("%a %d %b\n%H:%M").ok())
+            .and_then(|d| d.format("%a %d %b\n%H:%M:%S").ok())
             .unwrap_or_default();
         for (name, bar) in &mut bars {
             let new = new_bars.contains(name);
@@ -1016,7 +1036,9 @@ pub fn start(app: &gtk::Application) -> bool {
             {
                 tray.render(&bar.tray);
             }
-            bar.clock.set_label(&clock);
+            if bar.clock.text() != clock {
+                bar.clock.set_label(&clock);
+            }
             if metrics_changed || new || config_changed {
                 bar.update_metrics(&metrics, &config);
             }
@@ -1036,17 +1058,7 @@ pub fn start(app: &gtk::Application) -> bool {
             }
             if focused_output.as_deref() == Some(name) {
                 if let Some(volume) = &volume_event {
-                    let icon = if volume.muted {
-                        "audio-volume-muted-symbolic"
-                    } else if volume.level < 0.33 {
-                        "audio-volume-low-symbolic"
-                    } else if volume.level < 0.66 {
-                        "audio-volume-medium-symbolic"
-                    } else {
-                        "audio-volume-high-symbolic"
-                    };
-                    bar.volume
-                        .show(if volume.muted { 0. } else { volume.level }, icon);
+                    bar.volume.show_volume(volume);
                 }
                 if let Some(brightness) = brightness_event {
                     bar.brightness
