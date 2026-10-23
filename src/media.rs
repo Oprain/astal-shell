@@ -2,9 +2,15 @@ use crate::artwork::ArtworkCache;
 use glib::variant::ToVariant;
 use gtk::{gdk, gio, glib, graphene, prelude::*};
 use std::{
+    cell::Cell,
     collections::HashMap,
     path::PathBuf,
-    sync::mpsc::{self, Receiver},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+        mpsc::{self, Receiver},
+    },
     thread,
     time::Duration,
 };
@@ -24,8 +30,10 @@ pub struct Player {
     pub can_next: bool,
 }
 
-pub fn start() -> Receiver<Vec<Player>> {
+pub fn start() -> (Receiver<Vec<Player>>, Arc<AtomicI32>) {
     let (tx, rx) = mpsc::channel();
+    let size = Arc::new(AtomicI32::new(36));
+    let artwork_size = size.clone();
     thread::spawn(move || {
         let mut previous = Vec::new();
         let mut artwork = ArtworkCache::new();
@@ -48,15 +56,18 @@ pub fn start() -> Receiver<Vec<Player>> {
                     .map(|v| v.0)
                     .unwrap_or_default();
                 let mut players = Vec::new();
+                artwork.begin_update();
                 for name in names
                     .into_iter()
                     .filter(|n| n.starts_with("org.mpris.MediaPlayer2."))
                 {
                     if let Some(mut player) = read_player(&bus, name) {
-                        player.cover = artwork.resolve(&player.artwork);
+                        player.cover =
+                            artwork.resolve(&player.artwork, size.load(Ordering::Relaxed));
                         players.push(player);
                     }
                 }
+                artwork.end_update();
                 players.sort_by(|a, b| b.playing.cmp(&a.playing).then(a.bus_name.cmp(&b.bus_name)));
                 if players != previous {
                     previous = players.clone();
@@ -68,7 +79,7 @@ pub fn start() -> Receiver<Vec<Player>> {
             thread::sleep(Duration::from_secs(1));
         }
     });
-    rx
+    (rx, artwork_size)
 }
 
 fn read_player(bus: &gio::DBusConnection, name: String) -> Option<Player> {
@@ -156,9 +167,23 @@ pub fn action(bus_name: &str, method: &str) {
     });
 }
 
-fn cover_picture(path: Option<&PathBuf>) -> gtk::Picture {
-    let image = gtk::Picture::new();
-    if let Some(texture) = path.and_then(|path| gdk::Texture::from_filename(path).ok()) {
+#[derive(Default)]
+pub struct Textures(HashMap<PathBuf, gdk::Paintable>);
+
+impl Textures {
+    pub fn retain(&mut self, players: &[Player]) {
+        self.0.retain(|path, _| {
+            players
+                .iter()
+                .any(|player| player.cover.as_ref() == Some(path))
+        });
+    }
+
+    fn get(&mut self, path: &PathBuf) -> Option<gdk::Paintable> {
+        if let Some(paintable) = self.0.get(path) {
+            return Some(paintable.clone());
+        }
+        let texture = gdk::Texture::from_filename(path).ok()?;
         let side = 36.;
         let scale = side / texture.width().min(texture.height()).max(1) as f32;
         let width = texture.width() as f32 * scale;
@@ -172,43 +197,47 @@ fn cover_picture(path: Option<&PathBuf>) -> gtk::Picture {
         snapshot.pop();
         // A size request is only a minimum; bound the artwork's natural size too.
         let paintable = snapshot.to_paintable(Some(&graphene::Size::new(side, side)));
-        image.set_paintable(paintable.as_ref());
+        let paintable = paintable?;
+        self.0.insert(path.clone(), paintable.clone());
+        Some(paintable)
     }
-    image.set_widget_name("media-artwork");
-    image.set_size_request(36, 36);
-    image.set_content_fit(gtk::ContentFit::Cover);
-    image
 }
 
-pub fn render(container: &gtk::Box, players: &[Player]) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
-    }
-    for player in players {
+struct Row {
+    row: gtk::Box,
+    image: gtk::Picture,
+    play: gtk::Button,
+    next: gtk::Button,
+    artist: gtk::Label,
+    title: gtk::Label,
+    method: Rc<Cell<Option<&'static str>>>,
+    cover: Option<PathBuf>,
+}
+
+impl Row {
+    fn new(player: &Player) -> Self {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         row.set_widget_name("media-player");
         let cover = gtk::Overlay::new();
         cover.set_widget_name("media-cover");
         cover.add_css_class("cover-art");
         cover.set_overflow(gtk::Overflow::Hidden);
-        let image = cover_picture(player.cover.as_ref());
+        let image = gtk::Picture::new();
+        image.set_widget_name("media-artwork");
+        image.set_size_request(36, 36);
+        image.set_content_fit(gtk::ContentFit::Cover);
         cover.set_child(Some(&image));
         let play = gtk::Button::new();
         play.set_widget_name("media-play-pause");
         play.add_css_class("cover-control");
         play.set_halign(gtk::Align::Center);
         play.set_valign(gtk::Align::Center);
-        play.set_icon_name(if player.playing {
-            "media-playback-pause-symbolic"
-        } else {
-            "media-playback-start-symbolic"
-        });
-        play.set_sensitive(player.toggle_method.is_some());
         play.set_tooltip_text(Some("Play / pause"));
         let name = player.bus_name.clone();
-        let method = player.toggle_method;
+        let method = Rc::new(Cell::new(player.toggle_method));
+        let current_method = method.clone();
         play.connect_clicked(move |_| {
-            if let Some(method) = method {
+            if let Some(method) = current_method.get() {
                 action(&name, method);
             }
         });
@@ -238,31 +267,85 @@ pub fn render(container: &gtk::Box, players: &[Player]) {
         let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
         text.add_css_class("media-text");
         text.set_valign(gtk::Align::Center);
-        let artist = gtk::Label::new(Some(&player.artist));
+        let artist = gtk::Label::new(None);
         artist.set_widget_name("media-artist");
         artist.add_css_class("media-artist");
         artist.set_halign(gtk::Align::Start);
         artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
         artist.set_max_width_chars(20);
-        artist.set_visible(!player.artist.is_empty());
         text.append(&artist);
-        let label = gtk::Label::new(Some(&player.title));
+        let label = gtk::Label::new(None);
         label.set_widget_name("media-title");
         label.add_css_class("media-title");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_max_width_chars(16);
-        label.set_tooltip_text(Some(&format!("{}\n{}", player.artist, player.title)));
         text.append(&label);
         row.append(&text);
-        if player.can_next {
-            let next = gtk::Button::from_icon_name("media-skip-forward-symbolic");
-            next.set_widget_name("media-next");
-            let name = player.bus_name.clone();
-            next.connect_clicked(move |_| action(&name, "Next"));
-            row.append(&next);
+        let next = gtk::Button::from_icon_name("media-skip-forward-symbolic");
+        next.set_widget_name("media-next");
+        let name = player.bus_name.clone();
+        next.connect_clicked(move |_| action(&name, "Next"));
+        row.append(&next);
+        Self {
+            row,
+            image,
+            play,
+            next,
+            artist,
+            title: label,
+            method,
+            cover: None,
         }
-        container.append(&row);
+    }
+
+    fn update(&mut self, player: &Player, textures: &mut Textures) {
+        if self.cover != player.cover || self.image.paintable().is_none() {
+            let paintable = player.cover.as_ref().and_then(|path| textures.get(path));
+            self.image.set_paintable(paintable.as_ref());
+            self.cover = player.cover.clone();
+        }
+        self.method.set(player.toggle_method);
+        self.play.set_sensitive(player.toggle_method.is_some());
+        self.play.set_icon_name(if player.playing {
+            "media-playback-pause-symbolic"
+        } else {
+            "media-playback-start-symbolic"
+        });
+        self.next.set_visible(player.can_next);
+        self.artist.set_label(&player.artist);
+        self.artist.set_visible(!player.artist.is_empty());
+        self.title.set_label(&player.title);
+        self.title
+            .set_tooltip_text(Some(&format!("{}\n{}", player.artist, player.title)));
+    }
+}
+
+#[derive(Default)]
+pub struct View {
+    rows: HashMap<String, Row>,
+}
+
+impl View {
+    pub fn render(&mut self, container: &gtk::Box, players: &[Player], textures: &mut Textures) {
+        self.rows.retain(|name, row| {
+            let keep = players.iter().any(|player| &player.bus_name == name);
+            if !keep {
+                container.remove(&row.row);
+            }
+            keep
+        });
+        let mut previous: Option<gtk::Widget> = None;
+        for player in players {
+            let row = self.rows.entry(player.bus_name.clone()).or_insert_with(|| {
+                let row = Row::new(player);
+                container.append(&row.row);
+                row
+            });
+            row.update(player, textures);
+            container.reorder_child_after(&row.row, previous.as_ref());
+            previous = Some(row.row.clone().upcast());
+        }
     }
 }
 

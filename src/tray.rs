@@ -26,6 +26,16 @@ pub struct TrayItem {
     pub props: HashMap<String, glib::Variant>,
 }
 
+struct ItemView {
+    button: gtk::Button,
+    item: Rc<RefCell<TrayItem>>,
+}
+
+#[derive(Default)]
+pub struct View {
+    buttons: BTreeMap<String, ItemView>,
+}
+
 impl TrayItem {
     fn string(&self, key: &str) -> &str {
         self.props.get(key).and_then(|v| v.str()).unwrap_or("")
@@ -222,34 +232,36 @@ impl Tray {
         }
     }
 
-    pub fn render(&self, container: &gtk::Box) {
-        while let Some(child) = container.first_child() {
-            container.remove(&child);
-        }
-        for item in self.inner.items.borrow().values() {
+    pub fn render(&self, container: &gtk::Box, view: &mut View) {
+        let items = self.inner.items.borrow();
+        view.buttons.retain(|address, view| {
+            let keep = items
+                .get(address)
+                .is_some_and(|item| item.string("Status") != "Passive");
+            if !keep {
+                container.remove(&view.button);
+            }
+            keep
+        });
+        let mut previous: Option<gtk::Widget> = None;
+        for item in items.values() {
             if item.string("Status") == "Passive" {
                 continue;
             }
+            if let Some(view) = view.buttons.get(&item.address) {
+                update_button(&view.button, item, Some(&view.item.borrow()));
+                *view.item.borrow_mut() = item.clone();
+                container.reorder_child_after(&view.button, previous.as_ref());
+                previous = Some(view.button.clone().upcast());
+                continue;
+            }
             let button = gtk::Button::new();
-            let image = item_image(item);
-            button.set_child(Some(&image));
-            let title = if let Some(tooltip) = item.props.get("ToolTip") {
-                if tooltip.n_children() == 4 {
-                    format!(
-                        "{}\n{}",
-                        tooltip.child_value(2).str().unwrap_or(""),
-                        tooltip.child_value(3).str().unwrap_or("")
-                    )
-                } else {
-                    item.string("Title").into()
-                }
-            } else {
-                item.string("Title").into()
-            };
-            button.set_tooltip_text(Some(&title));
+            update_button(&button, item, None);
+            let current_item = Rc::new(RefCell::new(item.clone()));
             let bus = self.inner.bus.clone();
-            let item_copy = item.clone();
+            let item_copy = current_item.clone();
             button.connect_clicked(move |button| {
+                let item_copy = item_copy.borrow();
                 if item_copy
                     .props
                     .get("ItemIsMenu")
@@ -270,9 +282,10 @@ impl Tray {
                 let click = gtk::GestureClick::new();
                 click.set_button(mouse_button);
                 let bus = self.inner.bus.clone();
-                let item_copy = item.clone();
+                let item_copy = current_item.clone();
                 let weak_button = button.downgrade();
                 click.connect_pressed(move |gesture, _, _, _| {
+                    let item_copy = item_copy.borrow();
                     if mouse_button == 2 {
                         item_call(
                             &bus,
@@ -319,8 +332,48 @@ impl Tray {
                 }
             });
             container.append(&button);
+            container.reorder_child_after(&button, previous.as_ref());
+            previous = Some(button.clone().upcast());
+            view.buttons.insert(
+                item.address.clone(),
+                ItemView {
+                    button,
+                    item: current_item,
+                },
+            );
         }
     }
+}
+
+fn update_button(button: &gtk::Button, item: &TrayItem, previous: Option<&TrayItem>) {
+    let icon_changed = previous.is_none_or(|previous| {
+        [
+            "Status",
+            "IconName",
+            "IconPixmap",
+            "AttentionIconName",
+            "AttentionIconPixmap",
+            "IconThemePath",
+        ]
+        .iter()
+        .any(|key| previous.props.get(*key) != item.props.get(*key))
+    });
+    if icon_changed {
+        button.set_child(Some(&item_image(item)));
+    }
+    let title = if let Some(tooltip) = item.props.get("ToolTip")
+        && tooltip.is_container()
+        && tooltip.n_children() == 4
+    {
+        format!(
+            "{}\n{}",
+            tooltip.child_value(2).str().unwrap_or(""),
+            tooltip.child_value(3).str().unwrap_or("")
+        )
+    } else {
+        item.string("Title").into()
+    };
+    button.set_tooltip_text(Some(&title));
 }
 
 fn add_item(state: &Rc<Inner>, address: &str) {
@@ -444,7 +497,12 @@ fn item_image(item: &TrayItem) -> gtk::Image {
             let display = gtk::gdk::Display::default().unwrap();
             let theme = gtk::IconTheme::for_display(&display);
             let extra = item.string("IconThemePath");
-            if !extra.is_empty() {
+            if !extra.is_empty()
+                && !theme
+                    .search_path()
+                    .iter()
+                    .any(|path| path == std::path::Path::new(extra))
+            {
                 theme.add_search_path(extra);
             }
             image.set_icon_name(Some(name));

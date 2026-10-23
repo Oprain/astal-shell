@@ -254,9 +254,23 @@ pub fn parse_volume(text: &str) -> Option<Volume> {
 }
 
 fn start_levels(tx: Sender<Update>) {
+    let brightness_tx = tx.clone();
+    thread::spawn(move || {
+        let mut last_brightness = None;
+        loop {
+            if let Some(value) = brightness()
+                && last_brightness != Some(value)
+            {
+                last_brightness = Some(value);
+                if brightness_tx.send(Update::Brightness(value)).is_err() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
     thread::spawn(move || {
         let mut last_volume = None;
-        let mut last_brightness = None;
         loop {
             let started = Instant::now();
             if let Some(value) = output(
@@ -270,14 +284,6 @@ fn start_levels(tx: Sender<Update>) {
             {
                 last_volume = Some(value.clone());
                 if tx.send(Update::Volume(value)).is_err() {
-                    return;
-                }
-            }
-            if let Some(value) = brightness()
-                && last_brightness != Some(value)
-            {
-                last_brightness = Some(value);
-                if tx.send(Update::Brightness(value)).is_err() {
                     return;
                 }
             }

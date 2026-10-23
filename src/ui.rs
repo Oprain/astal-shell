@@ -174,13 +174,16 @@ struct Bars {
     workspace_buttons: BTreeMap<u64, gtk::Button>,
     dock: gtk::Box,
     dock_buttons: BTreeMap<u64, gtk::Button>,
+    dock_icons: BTreeMap<u64, String>,
     clock: gtk::Label,
     weather: gtk::Button,
     network: gtk::Label,
     metrics: gtk::Box,
     meters: BTreeMap<&'static str, Meter>,
     media: gtk::Box,
+    media_view: media::View,
     tray: gtk::Box,
+    tray_view: crate::tray::View,
     actions: gtk::Box,
     volume: Osd,
     brightness: Osd,
@@ -189,6 +192,7 @@ struct Bars {
     debug_layout: Value,
     last_geometry: (i32, i32, i32, Option<LogicalOutput>),
     waiting_for_outputs: Option<u64>,
+    panel_dirty: bool,
     state: Rc<RefCell<State>>,
 }
 
@@ -326,13 +330,16 @@ impl Bars {
             workspace_buttons: BTreeMap::new(),
             dock,
             dock_buttons: BTreeMap::new(),
+            dock_icons: BTreeMap::new(),
             clock,
             weather,
             network,
             metrics,
             meters: BTreeMap::new(),
             media,
+            media_view: media::View::default(),
             tray,
+            tray_view: crate::tray::View::default(),
             actions,
             volume,
             brightness,
@@ -341,6 +348,7 @@ impl Bars {
             debug_layout: Value::Null,
             last_geometry,
             waiting_for_outputs: Some(output_revision),
+            panel_dirty: true,
             state,
         };
         bars.configure(app, config);
@@ -457,6 +465,7 @@ impl Bars {
                     false
                 }
             });
+            self.dock_icons.retain(|id, _| ids.contains(id));
             let mut previous: Option<gtk::Widget> = None;
             for window in windows {
                 let id = window.id;
@@ -465,9 +474,11 @@ impl Bars {
                     self.dock.append(&button);
                     button
                 });
-                button.set_child(Some(
-                    &icons.image(window.app_id.as_deref().unwrap_or(""), 36),
-                ));
+                let app_id = window.app_id.as_deref().unwrap_or("");
+                if self.dock_icons.get(&id).map(String::as_str) != Some(app_id) {
+                    button.set_child(Some(&icons.image(app_id, 36)));
+                    self.dock_icons.insert(id, app_id.into());
+                }
                 button.set_tooltip_text(window.title.as_deref().or(window.app_id.as_deref()));
                 for class in ["focused", "urgent"] {
                     button.remove_css_class(class);
@@ -496,6 +507,7 @@ impl Bars {
             logical.clone(),
         );
         if geometry != self.last_geometry {
+            self.panel_dirty = true;
             self.last_geometry = geometry;
             self.waiting_for_outputs = Some(state.output_revision);
             let _ = refresh.send(());
@@ -524,23 +536,26 @@ impl Bars {
                 scale: self.monitor.scale_factor() as f64,
             });
         let width = (size.width * config.overview_zoom).floor().max(1.) as i32;
-        for widget in [
-            &self.media.upcast_ref::<gtk::Widget>(),
-            &self.network.upcast_ref::<gtk::Widget>(),
-            &self.metrics.upcast_ref::<gtk::Widget>(),
-        ] {
-            widget.set_visible(true);
-        }
-        // Remove optional content until GTK's minimum width fits the card.
-        for widget in [
-            &self.metrics.upcast_ref::<gtk::Widget>(),
-            &self.network.upcast_ref::<gtk::Widget>(),
-            &self.media.upcast_ref::<gtk::Widget>(),
-        ] {
-            if self.top_content.measure(gtk::Orientation::Horizontal, -1).0 <= width {
-                break;
+        if self.panel_dirty {
+            for widget in [
+                &self.media.upcast_ref::<gtk::Widget>(),
+                &self.network.upcast_ref::<gtk::Widget>(),
+                &self.metrics.upcast_ref::<gtk::Widget>(),
+            ] {
+                widget.set_visible(true);
             }
-            widget.set_visible(false);
+            // Remove optional content until GTK's minimum width fits the card.
+            for widget in [
+                &self.metrics.upcast_ref::<gtk::Widget>(),
+                &self.network.upcast_ref::<gtk::Widget>(),
+                &self.media.upcast_ref::<gtk::Widget>(),
+            ] {
+                if self.top_content.measure(gtk::Orientation::Horizontal, -1).0 <= width {
+                    break;
+                }
+                widget.set_visible(false);
+            }
+            self.panel_dirty = false;
         }
         let top_height = self
             .top_content
@@ -850,7 +865,8 @@ pub fn start(app: &gtk::Application) -> bool {
     let model = Rc::new(RefCell::new(State::default()));
     let (ipc, refresh_outputs) = ipc::start();
     let system = system::start();
-    let media = media::start();
+    let (media, artwork_size) = media::start();
+    let mut media_textures = media::Textures::default();
     let tray = match Tray::new() {
         Ok(tray) => Some(tray),
         Err(e) => {
@@ -867,7 +883,15 @@ pub fn start(app: &gtk::Application) -> bool {
     let changed = icon_dirty.clone();
     gio::AppInfoMonitor::get().connect_changed(move |_| changed.set(true));
     let mut bars = BTreeMap::<String, Bars>::new();
-    let mut last_config = Instant::now();
+    let (config_tx, config_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if config_tx.send(Config::load()).is_err() {
+                break;
+            }
+        }
+    });
     let mut last_tray = Instant::now() - Duration::from_secs(1);
     let mut config_error = String::new();
     let mut players = Vec::new();
@@ -877,12 +901,16 @@ pub fn start(app: &gtk::Application) -> bool {
     let mut last_volume = None;
     let mut last_brightness = None;
     let mut weather_value: Option<WeatherDisplay> = None;
+    let mut model_revision = 0;
+    let mut clock_second = None;
+    let mut clock = String::new();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         let _hold = &hold;
         for message in ipc.try_iter().take(1000) {
             let mut state = model.borrow_mut();
             match message {
                 Message::Connection(connected) => {
+                    state.revision = state.revision.wrapping_add(1);
                     state.connected = connected;
                     if !connected {
                         state.overview_open = false;
@@ -907,8 +935,8 @@ pub fn start(app: &gtk::Application) -> bool {
             }
         }
         let mut config_changed = false;
-        if last_config.elapsed() >= Duration::from_secs(1) {
-            match Config::load() {
+        for result in config_rx.try_iter() {
+            match result {
                 Ok(next) => {
                     config_error.clear();
                     if next != config {
@@ -929,7 +957,6 @@ pub fn start(app: &gtk::Application) -> bool {
                     }
                 }
             }
-            last_config = Instant::now();
         }
         let mut icons_changed = false;
         if icon_dirty.replace(false) {
@@ -973,6 +1000,15 @@ pub fn start(app: &gtk::Application) -> bool {
         if !new_bars.is_empty() {
             let _ = refresh_outputs.send(());
         }
+        artwork_size.store(
+            bars.values()
+                .map(|bar| bar.monitor.scale_factor())
+                .max()
+                .unwrap_or(1)
+                .clamp(1, 8)
+                * 36,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut media_changed = false;
         for next in media.try_iter() {
             players = next;
@@ -1032,11 +1068,21 @@ pub fn start(app: &gtk::Application) -> bool {
         let shown = overview_since.is_some_and(|since| {
             since.elapsed() >= Duration::from_millis(config.settings.reveal_delay_ms)
         });
+        let model_changed = model_revision != state.revision;
+        model_revision = state.revision;
         drop(state);
-        let clock = glib::DateTime::now_local()
+        let second = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .ok()
-            .and_then(|d| d.format("%a %d %b\n%H:%M:%S").ok())
-            .unwrap_or_default();
+            .map(|time| time.as_secs());
+        if shown && (clock_second != second || clock.is_empty()) {
+            clock = glib::DateTime::now_local()
+                .ok()
+                .and_then(|d| d.format("%a %d %b\n%H:%M:%S").ok())
+                .unwrap_or_default()
+                .to_string();
+            clock_second = second;
+        }
         for (name, bar) in &mut bars {
             let new = new_bars.contains(name);
             if config_changed {
@@ -1044,17 +1090,20 @@ pub fn start(app: &gtk::Application) -> bool {
             }
             if icons_changed || config_changed {
                 bar.dock_signature = Value::Null;
+                bar.dock_icons.clear();
             }
             if media_changed || new || config_changed {
-                media::render(&bar.media, &players);
+                bar.media_view
+                    .render(&bar.media, &players, &mut media_textures);
             }
             if (tray_changed || new)
                 && let Some(tray) = &tray
             {
-                tray.render(&bar.tray);
+                tray.render(&bar.tray, &mut bar.tray_view);
             }
             if bar.clock.text() != clock {
                 bar.clock.set_label(&clock);
+                bar.panel_dirty = true;
             }
             if metrics_changed || new || config_changed {
                 bar.update_metrics(&metrics, &config);
@@ -1082,9 +1131,18 @@ pub fn start(app: &gtk::Application) -> bool {
                         .show(brightness, "display-brightness-symbolic");
                 }
             }
-            bar.update_model(name, &icons);
+            bar.panel_dirty |= config_changed
+                || media_changed
+                || tray_changed
+                || metrics_changed
+                || weather_changed
+                || icons_changed;
+            if model_changed || new || config_changed || icons_changed {
+                bar.update_model(name, &icons);
+            }
             bar.layout(name, &config, shown, &refresh_outputs);
         }
+        media_textures.retain(&players);
         glib::ControlFlow::Continue
     });
     true
