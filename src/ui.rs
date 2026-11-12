@@ -1,6 +1,6 @@
 use crate::{icons::AppIcons, media, meter::Meter, tray::Tray, workspaces::WorkspaceIndicator};
 use astal_shell::{
-    config::{Config, QuickSetting},
+    config::{Config, QuickSetting, WeatherSettings},
     geometry::{self, OutputSize},
     ipc::{self, Message},
     model::{LogicalOutput, State},
@@ -845,6 +845,126 @@ fn apply_theme(provider: &gtk::CssProvider, config: &Config, reset_icon: Option<
     }
 }
 
+// Drain pending Niri IPC messages into the shared state, tracking when the
+// overview opened so the reveal delay can be measured from that instant.
+fn drain_ipc(
+    ipc: &mpsc::Receiver<Message>,
+    model: &Rc<RefCell<State>>,
+    overview_since: &mut Option<Instant>,
+) {
+    for message in ipc.try_iter().take(1000) {
+        let mut state = model.borrow_mut();
+        match message {
+            Message::Connection(connected) => {
+                state.revision = state.revision.wrapping_add(1);
+                state.connected = connected;
+                if !connected {
+                    state.overview_open = false;
+                    state.workspaces.clear();
+                    state.windows.clear();
+                    state.outputs.clear();
+                }
+            }
+            Message::Outputs(outputs) => {
+                state.outputs = outputs;
+                state.output_revision = state.output_revision.wrapping_add(1);
+            }
+            Message::Event(event) => {
+                let was_open = state.overview_open;
+                if let Err(e) = state.apply(event) {
+                    eprintln!("Niri event: {e}");
+                }
+                if state.overview_open != was_open {
+                    *overview_since = state.overview_open.then(Instant::now);
+                }
+            }
+        }
+    }
+}
+
+// Apply the newest reloaded configuration, reapplying the theme and forwarding
+// weather settings. Returns whether the active configuration changed.
+fn drain_config(
+    config_rx: &mpsc::Receiver<Result<Config, String>>,
+    config: &mut Config,
+    config_error: &mut String,
+    provider: &gtk::CssProvider,
+    inherited_icon_theme: &str,
+    weather_settings_tx: &mpsc::Sender<WeatherSettings>,
+) -> bool {
+    let mut config_changed = false;
+    for result in config_rx.try_iter() {
+        match result {
+            Ok(next) => {
+                config_error.clear();
+                if next != *config {
+                    let reset = (config.icon_theme().is_some() && next.icon_theme().is_none())
+                        .then(|| {
+                            session_icon_theme().unwrap_or_else(|| inherited_icon_theme.to_string())
+                        });
+                    *config = next;
+                    config_changed = true;
+                    apply_theme(provider, config, reset.as_deref());
+                    let _ = weather_settings_tx.send(config.settings.weather.clone());
+                }
+            }
+            Err(e) => {
+                if e != *config_error {
+                    eprintln!("Keeping previous configuration: {e}");
+                    *config_error = e;
+                }
+            }
+        }
+    }
+    config_changed
+}
+
+// System and weather updates emitted since the last tick. Volume and
+// brightness events are only surfaced once a prior value has been observed.
+#[derive(Default)]
+struct SystemUpdates {
+    volume_event: Option<system::Volume>,
+    brightness_event: Option<f64>,
+    metrics_changed: bool,
+    weather_changed: bool,
+}
+
+fn drain_system(
+    system: &mpsc::Receiver<Update>,
+    weather_rx: &mpsc::Receiver<Update>,
+    metrics: &mut Metrics,
+    last_volume: &mut Option<system::Volume>,
+    last_brightness: &mut Option<f64>,
+    weather_value: &mut Option<WeatherDisplay>,
+) -> SystemUpdates {
+    let mut updates = SystemUpdates::default();
+    for update in system.try_iter().chain(weather_rx.try_iter()) {
+        match update {
+            Update::Metrics(next) => {
+                *metrics = next;
+                updates.metrics_changed = true;
+            }
+            Update::Volume(next) => {
+                if last_volume.is_some() {
+                    updates.volume_event = Some(next.clone());
+                }
+                *last_volume = Some(next);
+            }
+            Update::Brightness(next) => {
+                if last_brightness.is_some() {
+                    updates.brightness_event = Some(next);
+                }
+                *last_brightness = Some(next);
+            }
+            Update::Weather(display) => {
+                *weather_value = Some(display);
+                updates.weather_changed = true;
+            }
+        }
+    }
+    updates
+}
+
 // Create bars for newly connected monitors, drop them for disconnected or
 // replaced ones, and return the connectors that gained a fresh set of bars.
 fn reconcile_bars(
@@ -971,58 +1091,15 @@ pub fn start(app: &gtk::Application) -> bool {
     let mut clock = String::new();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         let _hold = &hold;
-        for message in ipc.try_iter().take(1000) {
-            let mut state = model.borrow_mut();
-            match message {
-                Message::Connection(connected) => {
-                    state.revision = state.revision.wrapping_add(1);
-                    state.connected = connected;
-                    if !connected {
-                        state.overview_open = false;
-                        state.workspaces.clear();
-                        state.windows.clear();
-                        state.outputs.clear();
-                    }
-                }
-                Message::Outputs(outputs) => {
-                    state.outputs = outputs;
-                    state.output_revision = state.output_revision.wrapping_add(1);
-                }
-                Message::Event(event) => {
-                    let was_open = state.overview_open;
-                    if let Err(e) = state.apply(event) {
-                        eprintln!("Niri event: {e}");
-                    }
-                    if state.overview_open != was_open {
-                        overview_since = state.overview_open.then(Instant::now);
-                    }
-                }
-            }
-        }
-        let mut config_changed = false;
-        for result in config_rx.try_iter() {
-            match result {
-                Ok(next) => {
-                    config_error.clear();
-                    if next != config {
-                        let reset = (config.icon_theme().is_some() && next.icon_theme().is_none())
-                            .then(|| {
-                                session_icon_theme().unwrap_or_else(|| inherited_icon_theme.clone())
-                            });
-                        config = next;
-                        config_changed = true;
-                        apply_theme(&provider, &config, reset.as_deref());
-                        let _ = weather_settings_tx.send(config.settings.weather.clone());
-                    }
-                }
-                Err(e) => {
-                    if e != config_error {
-                        eprintln!("Keeping previous configuration: {e}");
-                        config_error = e;
-                    }
-                }
-            }
-        }
+        drain_ipc(&ipc, &model, &mut overview_since);
+        let config_changed = drain_config(
+            &config_rx,
+            &mut config,
+            &mut config_error,
+            &provider,
+            &inherited_icon_theme,
+            &weather_settings_tx,
+        );
         let mut icons_changed = false;
         if icon_dirty.replace(false) {
             icons.refresh();
@@ -1061,34 +1138,19 @@ pub fn start(app: &gtk::Application) -> bool {
             .values()
             .find(|w| w.is_focused)
             .and_then(|w| w.output.clone());
-        let mut volume_event = None;
-        let mut brightness_event = None;
-        let mut metrics_changed = false;
-        let mut weather_changed = false;
-        for update in system.try_iter().chain(weather_rx.try_iter()) {
-            match update {
-                Update::Metrics(next) => {
-                    metrics = next;
-                    metrics_changed = true;
-                }
-                Update::Volume(next) => {
-                    if last_volume.is_some() {
-                        volume_event = Some(next.clone());
-                    }
-                    last_volume = Some(next);
-                }
-                Update::Brightness(next) => {
-                    if last_brightness.is_some() {
-                        brightness_event = Some(next);
-                    }
-                    last_brightness = Some(next);
-                }
-                Update::Weather(display) => {
-                    weather_value = Some(display);
-                    weather_changed = true;
-                }
-            }
-        }
+        let SystemUpdates {
+            volume_event,
+            brightness_event,
+            metrics_changed,
+            weather_changed,
+        } = drain_system(
+            &system,
+            &weather_rx,
+            &mut metrics,
+            &mut last_volume,
+            &mut last_brightness,
+            &mut weather_value,
+        );
         let state = model.borrow();
         if state.overview_open && state.connected {
             if overview_since.is_none() {
