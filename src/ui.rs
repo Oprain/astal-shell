@@ -605,51 +605,65 @@ impl Bars {
         self.volume.tick(osd_safe);
         self.brightness.tick(osd_safe);
         if std::env::var_os("ASTAL_SHELL_DEBUG_LAYOUT").is_some() {
-            let top_origin = (
-                f64::from(placement.horizontal),
-                f64::from(placement.vertical),
-            );
-            let bottom_origin = (
-                f64::from(placement.horizontal),
-                size.height - f64::from(placement.bottom_vertical + self.bottom.height()),
-            );
-            let snapshot = json!({
-                "output": output,
-                "top": [self.top.width(), self.top.height()],
-                "panel": [self.top_content.width(), self.top_content.height()],
-                "bottom": [self.bottom.width(), self.bottom.height()],
-                "left": [self.left.width(), self.left.height()],
-                "placement": placement,
-                "shown": shown,
-                "connected": state.connected,
-                "revealDelayMs": config.settings.reveal_delay_ms,
-                "clock": self.clock.text().to_string(),
-                "workspaceIndicator": {
-                    "bounds": widget_bounds(&self.workspace_indicator.marker, &self.left,
-                        (f64::from(placement.left), f64::from(config.settings.clearance + 2))),
-                    "visible": self.workspace_indicator.marker.is_visible(),
-                    "animating": self.workspace_indicator.is_animating(),
-                },
-                "targets": {
-                    "workspaces": child_bounds(&self.workspaces, &self.left,
-                        (f64::from(placement.left), f64::from(config.settings.clearance + 2)),
-                        state.workspaces_on(output).iter().map(|w| w.id)),
-                    "dock": child_bounds(&self.dock, &self.bottom, bottom_origin,
-                        state.windows_on(output).iter().map(|w| w.id)),
-                    "media": named_bounds(self.media.upcast_ref(), &self.top, top_origin),
-                    "tray": self.tray.first_child().and_then(|w| widget_bounds(&w, &self.top, top_origin)),
-                },
-                "volume": {
-                    "visible": self.volume.window.is_visible(),
-                    "label": self.volume.label.text().to_string(),
-                    "fraction": self.volume.progress.fraction(),
-                },
-            });
+            let snapshot = self.debug_snapshot(output, config, &state, &placement, size, shown);
             if snapshot != self.debug_layout {
                 eprintln!("layout: {snapshot}");
                 self.debug_layout = snapshot;
             }
         }
+    }
+
+    fn debug_snapshot(
+        &self,
+        output: &str,
+        config: &Config,
+        state: &State,
+        placement: &geometry::Placement,
+        size: OutputSize,
+        shown: bool,
+    ) -> Value {
+        let left_origin = (
+            f64::from(placement.left),
+            f64::from(config.settings.clearance + 2),
+        );
+        let top_origin = (
+            f64::from(placement.horizontal),
+            f64::from(placement.vertical),
+        );
+        let bottom_origin = (
+            f64::from(placement.horizontal),
+            size.height - f64::from(placement.bottom_vertical + self.bottom.height()),
+        );
+        json!({
+            "output": output,
+            "top": [self.top.width(), self.top.height()],
+            "panel": [self.top_content.width(), self.top_content.height()],
+            "bottom": [self.bottom.width(), self.bottom.height()],
+            "left": [self.left.width(), self.left.height()],
+            "placement": placement,
+            "shown": shown,
+            "connected": state.connected,
+            "revealDelayMs": config.settings.reveal_delay_ms,
+            "clock": self.clock.text().to_string(),
+            "workspaceIndicator": {
+                "bounds": widget_bounds(&self.workspace_indicator.marker, &self.left, left_origin),
+                "visible": self.workspace_indicator.marker.is_visible(),
+                "animating": self.workspace_indicator.is_animating(),
+            },
+            "targets": {
+                "workspaces": child_bounds(&self.workspaces, &self.left, left_origin,
+                    state.workspaces_on(output).iter().map(|w| w.id)),
+                "dock": child_bounds(&self.dock, &self.bottom, bottom_origin,
+                    state.windows_on(output).iter().map(|w| w.id)),
+                "media": named_bounds(self.media.upcast_ref(), &self.top, top_origin),
+                "tray": self.tray.first_child().and_then(|w| widget_bounds(&w, &self.top, top_origin)),
+            },
+            "volume": {
+                "visible": self.volume.window.is_visible(),
+                "label": self.volume.label.text().to_string(),
+                "fraction": self.volume.progress.fraction(),
+            },
+        })
     }
 
     fn update_metrics(&mut self, m: &Metrics, config: &Config) {
