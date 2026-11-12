@@ -717,6 +717,19 @@ impl Bars {
             window.close();
         }
     }
+
+    fn set_weather(&self, display: &WeatherDisplay, enabled: bool) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        if let Some(icon) = display.icon {
+            let image = gtk::Image::from_icon_name(icon);
+            image.set_pixel_size(14);
+            row.append(&image);
+        }
+        row.append(&gtk::Label::new(Some(&display.text)));
+        self.weather.set_child(Some(&row));
+        self.weather.set_tooltip_text(Some(&display.tooltip));
+        self.weather.set_visible(enabled);
+    }
 }
 
 fn dock_actions(actions: Vec<Value>) {
@@ -1117,16 +1130,7 @@ pub fn start(app: &gtk::Application) -> bool {
             if (weather_changed || new || config_changed)
                 && let Some(display) = &weather_value
             {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-                if let Some(icon) = display.icon {
-                    let image = gtk::Image::from_icon_name(icon);
-                    image.set_pixel_size(14);
-                    row.append(&image);
-                }
-                row.append(&gtk::Label::new(Some(&display.text)));
-                bar.weather.set_child(Some(&row));
-                bar.weather.set_tooltip_text(Some(&display.tooltip));
-                bar.weather.set_visible(config.settings.weather.enable);
+                bar.set_weather(display, config.settings.weather.enable);
             }
             if focused_output.as_deref() == Some(name) {
                 if let Some(volume) = &volume_event {
