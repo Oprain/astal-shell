@@ -845,6 +845,52 @@ fn apply_theme(provider: &gtk::CssProvider, config: &Config, reset_icon: Option<
     }
 }
 
+// Create bars for newly connected monitors, drop them for disconnected or
+// replaced ones, and return the connectors that gained a fresh set of bars.
+fn reconcile_bars(
+    app: &gtk::Application,
+    monitors: &gio::ListModel,
+    config: &Config,
+    model: &Rc<RefCell<State>>,
+    bars: &mut BTreeMap<String, Bars>,
+) -> BTreeSet<String> {
+    let mut connected = BTreeSet::new();
+    let mut new_bars = BTreeSet::new();
+    for index in 0..monitors.n_items() {
+        let Some(monitor) = monitors.item(index).and_downcast::<gdk::Monitor>() else {
+            continue;
+        };
+        let Some(connector) = monitor.connector() else {
+            continue;
+        };
+        let name = connector.to_string();
+        connected.insert(name.clone());
+        if bars.get(&name).is_some_and(|b| b.monitor != monitor)
+            && let Some(old) = bars.remove(&name)
+        {
+            old.close();
+        }
+        if !bars.contains_key(&name) {
+            bars.insert(
+                name.clone(),
+                Bars::new(app, &monitor, &name, config, model.clone()),
+            );
+            new_bars.insert(name);
+        }
+    }
+    let removed: Vec<_> = bars
+        .keys()
+        .filter(|k| !connected.contains(*k))
+        .cloned()
+        .collect();
+    for name in removed {
+        if let Some(old) = bars.remove(&name) {
+            old.close();
+        }
+    }
+    new_bars
+}
+
 fn session_icon_theme() -> Option<String> {
     let ini = glib::KeyFile::new();
     ini.load_from_file(
@@ -982,40 +1028,7 @@ pub fn start(app: &gtk::Application) -> bool {
             icons.refresh();
             icons_changed = true;
         }
-        let mut connected = BTreeSet::new();
-        let mut new_bars = BTreeSet::new();
-        for index in 0..monitors.n_items() {
-            let Some(monitor) = monitors.item(index).and_downcast::<gdk::Monitor>() else {
-                continue;
-            };
-            let Some(connector) = monitor.connector() else {
-                continue;
-            };
-            let name = connector.to_string();
-            connected.insert(name.clone());
-            if bars.get(&name).is_some_and(|b| b.monitor != monitor)
-                && let Some(old) = bars.remove(&name)
-            {
-                old.close();
-            }
-            if !bars.contains_key(&name) {
-                bars.insert(
-                    name.clone(),
-                    Bars::new(&app, &monitor, &name, &config, model.clone()),
-                );
-                new_bars.insert(name);
-            }
-        }
-        let removed: Vec<_> = bars
-            .keys()
-            .filter(|k| !connected.contains(*k))
-            .cloned()
-            .collect();
-        for name in removed {
-            if let Some(old) = bars.remove(&name) {
-                old.close();
-            }
-        }
+        let new_bars = reconcile_bars(&app, &monitors, &config, &model, &mut bars);
         if !new_bars.is_empty() {
             let _ = refresh_outputs.send(());
         }
