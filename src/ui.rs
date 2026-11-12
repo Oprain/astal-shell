@@ -730,6 +730,57 @@ impl Bars {
         self.weather.set_tooltip_text(Some(&display.tooltip));
         self.weather.set_visible(enabled);
     }
+
+    fn render_frame(&mut self, name: &str, frame: &Frame, media_textures: &mut media::Textures) {
+        let new = frame.new_bars.contains(name);
+        if frame.config_changed {
+            self.configure(frame.app, frame.config);
+        }
+        if frame.icons_changed || frame.config_changed {
+            self.dock_signature = Value::Null;
+            self.dock_icons.clear();
+        }
+        if frame.media_changed || new || frame.config_changed {
+            self.media_view
+                .render(&self.media, frame.players, media_textures);
+        }
+        if (frame.tray_changed || new)
+            && let Some(tray) = frame.tray
+        {
+            tray.render(&self.tray, &mut self.tray_view);
+        }
+        if self.clock.text() != frame.clock {
+            self.clock.set_label(frame.clock);
+            self.panel_dirty = true;
+        }
+        if frame.metrics_changed || new || frame.config_changed {
+            self.update_metrics(frame.metrics, frame.config);
+        }
+        if (frame.weather_changed || new || frame.config_changed)
+            && let Some(display) = frame.weather
+        {
+            self.set_weather(display, frame.config.settings.weather.enable);
+        }
+        if frame.focused_output == Some(name) {
+            if let Some(volume) = frame.volume_event {
+                self.volume.show_volume(volume);
+            }
+            if let Some(brightness) = frame.brightness_event {
+                self.brightness
+                    .show(brightness, "display-brightness-symbolic");
+            }
+        }
+        self.panel_dirty |= frame.config_changed
+            || frame.media_changed
+            || frame.tray_changed
+            || frame.metrics_changed
+            || frame.weather_changed
+            || frame.icons_changed;
+        if frame.model_changed || new || frame.config_changed || frame.icons_changed {
+            self.update_model(name, frame.icons);
+        }
+        self.layout(name, frame.config, frame.shown, frame.refresh);
+    }
 }
 
 fn dock_actions(actions: Vec<Value>) {
@@ -843,6 +894,31 @@ fn apply_theme(provider: &gtk::CssProvider, config: &Config, reset_icon: Option<
     {
         settings.set_gtk_icon_theme_name(Some(icon));
     }
+}
+
+// Per-tick inputs shared across every bar when rendering a frame.
+struct Frame<'a> {
+    app: &'a gtk::Application,
+    config: &'a Config,
+    tray: Option<&'a Tray>,
+    players: &'a [media::Player],
+    weather: Option<&'a WeatherDisplay>,
+    volume_event: Option<&'a system::Volume>,
+    brightness_event: Option<f64>,
+    metrics: &'a Metrics,
+    clock: &'a str,
+    focused_output: Option<&'a str>,
+    new_bars: &'a BTreeSet<String>,
+    refresh: &'a mpsc::Sender<()>,
+    shown: bool,
+    config_changed: bool,
+    icons_changed: bool,
+    media_changed: bool,
+    tray_changed: bool,
+    metrics_changed: bool,
+    weather_changed: bool,
+    model_changed: bool,
+    icons: &'a AppIcons,
 }
 
 // Drain pending Niri IPC messages into the shared state, tracking when the
@@ -1177,55 +1253,31 @@ pub fn start(app: &gtk::Application) -> bool {
                 .to_string();
             clock_second = second;
         }
+        let frame = Frame {
+            app: &app,
+            config: &config,
+            tray: tray.as_ref(),
+            players: &players,
+            weather: weather_value.as_ref(),
+            volume_event: volume_event.as_ref(),
+            brightness_event,
+            metrics: &metrics,
+            clock: &clock,
+            focused_output: focused_output.as_deref(),
+            new_bars: &new_bars,
+            refresh: &refresh_outputs,
+            shown,
+            config_changed,
+            icons_changed,
+            media_changed,
+            tray_changed,
+            metrics_changed,
+            weather_changed,
+            model_changed,
+            icons: &icons,
+        };
         for (name, bar) in &mut bars {
-            let new = new_bars.contains(name);
-            if config_changed {
-                bar.configure(&app, &config);
-            }
-            if icons_changed || config_changed {
-                bar.dock_signature = Value::Null;
-                bar.dock_icons.clear();
-            }
-            if media_changed || new || config_changed {
-                bar.media_view
-                    .render(&bar.media, &players, &mut media_textures);
-            }
-            if (tray_changed || new)
-                && let Some(tray) = &tray
-            {
-                tray.render(&bar.tray, &mut bar.tray_view);
-            }
-            if bar.clock.text() != clock {
-                bar.clock.set_label(&clock);
-                bar.panel_dirty = true;
-            }
-            if metrics_changed || new || config_changed {
-                bar.update_metrics(&metrics, &config);
-            }
-            if (weather_changed || new || config_changed)
-                && let Some(display) = &weather_value
-            {
-                bar.set_weather(display, config.settings.weather.enable);
-            }
-            if focused_output.as_deref() == Some(name) {
-                if let Some(volume) = &volume_event {
-                    bar.volume.show_volume(volume);
-                }
-                if let Some(brightness) = brightness_event {
-                    bar.brightness
-                        .show(brightness, "display-brightness-symbolic");
-                }
-            }
-            bar.panel_dirty |= config_changed
-                || media_changed
-                || tray_changed
-                || metrics_changed
-                || weather_changed
-                || icons_changed;
-            if model_changed || new || config_changed || icons_changed {
-                bar.update_model(name, &icons);
-            }
-            bar.layout(name, &config, shown, &refresh_outputs);
+            bar.render_frame(name, &frame, &mut media_textures);
         }
         media_textures.retain(&players);
         glib::ControlFlow::Continue
