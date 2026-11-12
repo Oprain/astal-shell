@@ -162,6 +162,14 @@ fn named_bounds(
     bounds
 }
 
+fn toggle_css(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
+    if enabled {
+        widget.add_css_class(class);
+    } else {
+        widget.remove_css_class(class);
+    }
+}
+
 struct Bars {
     monitor: gdk::Monitor,
     top: gtk::ApplicationWindow,
@@ -415,18 +423,9 @@ impl Bars {
                     self.workspaces.append(&button);
                     button
                 });
-                for class in ["active", "focused", "urgent"] {
-                    button.remove_css_class(class);
-                }
-                if workspace.is_active {
-                    button.add_css_class("active");
-                }
-                if workspace.is_focused {
-                    button.add_css_class("focused");
-                }
-                if workspace.is_urgent {
-                    button.add_css_class("urgent");
-                }
+                toggle_css(button, "active", workspace.is_active);
+                toggle_css(button, "focused", workspace.is_focused);
+                toggle_css(button, "urgent", workspace.is_urgent);
                 button.set_tooltip_text(Some(&format!(
                     "{}: {}",
                     workspace.idx,
@@ -480,15 +479,8 @@ impl Bars {
                     self.dock_icons.insert(id, app_id.into());
                 }
                 button.set_tooltip_text(window.title.as_deref().or(window.app_id.as_deref()));
-                for class in ["focused", "urgent"] {
-                    button.remove_css_class(class);
-                }
-                if active == Some(window.id) {
-                    button.add_css_class("focused");
-                }
-                if window.is_urgent {
-                    button.add_css_class("urgent");
-                }
+                toggle_css(button, "focused", active == Some(window.id));
+                toggle_css(button, "urgent", window.is_urgent);
                 self.dock.reorder_child_after(button, previous.as_ref());
                 previous = Some(button.clone().upcast());
             }
